@@ -1,0 +1,74 @@
+name: Daily data refresh
+
+# The government API does not route from Render, so the data has to arrive
+# with the code. This job refreshes data/real/market_history.parquet and
+# commits it. Render watches the repo, so the site redeploys with new numbers
+# on its own. Nothing runs on the server side.
+
+on:
+  schedule:
+    # 03:17 IST every day. Agmarknet publishes late evening IST, so by early
+    # morning the previous day's arrivals are complete.
+    - cron: "47 21 * * *"
+  workflow_dispatch:          # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: write             # needed to commit the refreshed file
+
+concurrency:
+  group: data-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Report current freshness
+        run: python -m ingest.refresh_data --check || true
+
+      - name: Refresh the data file
+        env:
+          DATA_GOV_API_KEY: ${{ secrets.DATA_GOV_API_KEY }}
+        run: python -m ingest.refresh_data
+
+      - name: Verify the result loads
+        run: |
+          python - <<'PY'
+          import pandas as pd, sys
+          df = pd.read_parquet("data/real/market_history.parquet")
+          print(f"rows      : {len(df):,}")
+          print(f"columns   : {list(df.columns)}")
+          print(f"newest    : {df['arrival_date'].max()}")
+          print(f"states    : {df['state'].nunique()}")
+          if len(df) < 100_000:
+              sys.exit("refusing to commit: too few rows")
+          PY
+
+      - name: Commit the new file
+        run: |
+          git config user.name  "mandi-lens bot"
+          git config user.email "actions@github.com"
+          git add data/real/market_history.parquet
+          if git diff --staged --quiet; then
+            echo "No change in the data today."
+            exit 0
+          fi
+          NEWEST=$(python -c "import pandas as pd;print(pd.read_parquet('data/real/market_history.parquet',columns=['arrival_date'])['arrival_date'].max())")
+          git commit -m "data: refresh market history (newest ${NEWEST})"
+          git push
+
+      - name: Summary
+        run: |
+          python -m ingest.refresh_data --check >> $GITHUB_STEP_SUMMARY || true
