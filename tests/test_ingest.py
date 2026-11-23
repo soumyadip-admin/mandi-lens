@@ -76,8 +76,9 @@ class TestNormalise(unittest.TestCase):
             "commodity": "Potato", "variety": "Local", "grade": "A",
             "arrival_date": "21/11/2026", "min_price": "1,000",
             "max_price": "1,300", "modal_price": "1,150"}], "test")
+        rows = list(rows)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rej, 0)
+        self.assertEqual(rej[0], 0)
         self.assertEqual(rows[0]["arrival_date"], "2026-11-21")
         self.assertEqual(rows[0]["modal_price"], 1150.0)
 
@@ -86,18 +87,21 @@ class TestNormalise(unittest.TestCase):
             "state": "Bihar", "market": "Patna City", "commodity": "Rice",
             "arrival_date": "21/11/2026", "min_price": "100", "max_price": "200",
             "modal_price": "NR"}], "test")
+        rows = list(rows)
         self.assertEqual(rows[0]["modal_price"], 150.0)
 
     def test_unusable_row_rejected(self):
         rows, rej = normalise([{"state": "Bihar", "commodity": "Rice",
                                 "arrival_date": "garbage",
                                 "modal_price": "100"}], "test")
+        rows = list(rows)
         self.assertEqual(len(rows), 0)
-        self.assertEqual(rej, 1)
+        self.assertEqual(rej[0], 1)
 
     def test_missing_variety_defaults_empty(self):
         rows, _ = normalise([{"state": "Bihar", "market": "M", "commodity": "Rice",
                               "arrival_date": "21/11/2026", "modal_price": "1000"}], "test")
+        rows = list(rows)
         self.assertEqual(rows[0]["variety"], "")
 
 
