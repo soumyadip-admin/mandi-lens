@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} price today — Mandi Lens{% endblock %}
+{% block ogtitle %}{{ name }} price today — Mandi Lens{% endblock %}
+{% block body %}
+
+<p style="margin:0 0 10px"><a href="/">← All prices</a></p>
+<h1>{{ name }}</h1>
+<p class="lede">
+  {% if chart and overall is not none %}
+    Average wholesale price is <b>₹{{ chart.last|rupees }}</b> per quintal{% if state %} in {{ state }}{% endif %},
+    {% if overall > 0 %}<span style="color:var(--up)">up {{ overall }}%</span>{% elif overall < 0 %}<span style="color:var(--down)">down {{ overall|abs }}%</span>{% else %}flat{% endif %}
+    across {{ chart.n }} reported days.
+  {% else %}Not enough history yet.{% endif %}
+</p>
+
+<form method="get" class="search">
+  <select name="state">
+    <option value="">All India</option>
+    {% for s in states %}<option value="{{ s }}" {{ 'selected' if s == state }}>{{ s }}</option>{% endfor %}
+  </select>
+  <button type="submit">Filter</button>
+</form>
+
+{% if chart %}
+<div class="card">
+  <h2>Price trend · average across markets</h2>
+  <svg class="chart" viewBox="0 0 {{ chart.w }} {{ chart.h }}" preserveAspectRatio="none" role="img"
+       aria-label="Price trend chart">
+    <polygon points="{{ chart.area }}" fill="{{ chart.color }}" opacity="0.13"></polygon>
+    <polyline points="{{ chart.line }}" fill="none" stroke="{{ chart.color }}"
+              stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"></polyline>
+  </svg>
+  <div class="legend">
+    <span>₹{{ chart.lo|rupees }} – ₹{{ chart.hi|rupees }} range</span>
+    <span>{{ chart.n }} days</span>
+  </div>
+</div>
+{% endif %}
+
+{% if best and cheapest and best.market != cheapest.market %}
+<div class="card" style="background:var(--panel2)">
+  <h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="2.4"
+   stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:7px" aria-hidden="true">
+   <path d="M9 18h6"/><path d="M10 21h4"/>
+   <path d="M12 3a6 6 0 0 0-3.5 10.9c.4.3.5.7.5 1.1v1h6v-1c0-.4.1-.8.5-1.1A6 6 0 0 0 12 3z"/></svg>Where to buy / sell</h2>
+  <p style="margin:0;font-size:15px">
+    <b>{{ best.market }}</b> ({{ best.state }}) has the highest price at
+    <b>₹{{ best.modal_price|rupees }}</b>.
+    <b>{{ cheapest.market }}</b> ({{ cheapest.state }}) is lowest at
+    <b>₹{{ cheapest.modal_price|rupees }}</b> — a spread of
+    <b>₹{{ (best.modal_price - cheapest.modal_price)|rupees }}</b> per quintal.
+  </p>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Latest price by market</h2>
+  {% if spread %}
+  <div class="scroll">
+  <table class="data">
+    <thead><tr>
+      <th>Market</th><th>State</th><th class="num">Price</th><th class="num">Change</th><th>Date</th>
+    </tr></thead>
+    <tbody>
+    {% for r in spread %}
+      <tr>
+        <td><b>{{ r.market }}</b>{% if r.district %}<span class="mkt"> {{ r.district }}</span>{% endif %}</td>
+        <td class="mkt">{{ r.state }}</td>
+        <td class="num"><b>₹{{ r.modal_price|rupees }}</b></td>
+        <td class="num">
+          {% if r.change is not none %}
+            <span class="pill {{ 'up' if r.change > 0 else ('down' if r.change < 0 else 'flat') }}">
+              {{ r.change|delta }} ({{ r.pct }}%)
+            </span>
+          {% else %}<span class="mkt">—</span>{% endif %}
+        </td>
+        <td class="mkt">{{ r.arrival_date|nicedate }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="mkt">No market data for this crop yet.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Machine readable</h2>
+  <p class="mkt" style="margin:0 0 8px">Use this data in your own project:</p>
+  <code style="display:block;padding:10px 12px;margin-bottom:6px;overflow-x:auto">/api/trend/{{ name|urlencode }}</code>
+  <code style="display:block;padding:10px 12px;overflow-x:auto">/api/spread/{{ name|urlencode }}</code>
+</div>
+
+{% endblock %}

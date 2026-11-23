@@ -1,0 +1,25 @@
+# Render Blueprint — one-click deploy.
+# In Render: New → Blueprint → pick this repo. It reads this file.
+services:
+  - type: web
+    name: mandi-lens
+    runtime: python
+    plan: free
+    region: singapore          # closest free region to India
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bootstrap.py && gunicorn app.main:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: DATA_GOV_API_KEY
+        sync: false            # you paste it in the dashboard, never in git
+      - key: MANDI_INTERVAL_HOURS
+        value: "6"
+      - key: BOOT_FETCH_PAGES
+        value: "2"              # keep boot under a minute; refresh does the rest
+      - key: MANDI_AUTO_REFRESH
+        value: "1"              # refresh stale data in a background thread
+      - key: MANDI_REFRESH_PAGES
+        value: "0"              # 0 = full national pull when it does refresh
+    healthCheckPath: /health
+

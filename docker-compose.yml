@@ -1,0 +1,21 @@
+services:
+  web:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      - DATA_GOV_API_KEY=${DATA_GOV_API_KEY:-}
+    volumes: ["mandi-data:/app/data"]
+    restart: unless-stopped
+
+  # refreshes the data every 6 hours, independent of the web process
+  ingest:
+    build: .
+    command: ["python", "-m", "ingest.scheduler"]
+    environment:
+      - DATA_GOV_API_KEY=${DATA_GOV_API_KEY:-}
+      - MANDI_INTERVAL_HOURS=6
+    volumes: ["mandi-data:/app/data"]
+    restart: unless-stopped
+
+volumes:
+  mandi-data:

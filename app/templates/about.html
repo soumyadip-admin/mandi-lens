@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}About — Mandi Lens{% endblock %}
+{% block body %}
+<h1>About Mandi Lens</h1>
+<p class="lede">A clean, fast, phone-friendly front-end for India's open mandi price data.</p>
+
+<div class="card">
+  <h2>Where the data comes from</h2>
+  <p>Every price on this site comes from the
+  <a href="https://data.gov.in" target="_blank" rel="noopener">Open Government Data Platform of India</a>
+  (data.gov.in), published by the Directorate of Marketing &amp; Inspection. It is free, public and
+  openly licensed. We do not invent, estimate or predict a single figure.</p>
+</div>
+
+<div class="card">
+  <h2>What the numbers mean</h2>
+  <ul style="margin:0;padding-left:20px;color:var(--dim);line-height:1.8">
+    <li><b style="color:var(--ink)">Modal price</b> — the price at which most of the day's trade
+      actually happened. This is the number to trust.</li>
+    <li><b style="color:var(--ink)">Min / Max</b> — the lowest and highest accepted bids that day,
+      usually reflecting different quality grades.</li>
+    <li><b style="color:var(--ink)">Quintel</b> — all prices are ₹ per quintal. One quintal = 100 kg.</li>
+    <li><b style="color:var(--ink)">Arrival date</b> — the day the produce arrived at the market,
+      which is not always today.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>Honest limits</h2>
+  <ul style="margin:0;padding-left:20px;color:var(--dim);line-height:1.8">
+    <li>Not every market reports every day, and some markets report late.</li>
+    <li>A price is an <b>indicative</b> wholesale rate, not an offer to buy or sell.</li>
+    <li>Transport, commission and grading costs are not included.</li>
+    <li>If the data looks old, the banner at the top will say so.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>Open API</h2>
+  <p class="mkt" style="margin:0 0 10px">Free to use, no key needed:</p>
+  <code style="display:block;padding:10px 12px;margin-bottom:8px">/api/prices?commodity=Potato&amp;state=West%20Bengal</code>
+  <code style="display:block;padding:10px 12px;margin-bottom:8px">/api/trend/Potato</code>
+  <code style="display:block;padding:10px 12px;margin-bottom:8px">/api/states</code>
+  <code style="display:block;padding:10px 12px">/health</code>
+</div>
+
+<div class="card">
+  <h2>Status</h2>
+  <p class="mkt" style="margin:0">
+    {{ info.records|rupees }} records · {{ info.commodities }} crops · {{ info.markets }} markets ·
+    latest {{ info.latest_date|nicedate }}<br>
+    Last ingest: {% if info.run and info.run.ended_at %}{{ info.run.ended_at }} UTC
+    ({{ info.run.source }}, {{ info.run.status }}){% else %}never{% endif %}
+  </p>
+</div>
+{% endblock %}

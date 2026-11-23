@@ -1,0 +1,240 @@
+{% extends "base.html" %}
+{% block body %}
+
+<h1>Today's mandi prices</h1>
+<p class="lede">Wholesale crop prices from government markets across India.
+Pick a crop to see what it's selling for, market by market.</p>
+
+{% if crops3d %}
+<div class="hero3d">
+  <canvas id="hero3d"></canvas>
+  <div class="hero3d-cap"><b>Live 3D</b> · drag to spin · hover a bar</div>
+</div>
+{% endif %}
+
+<form class="search" method="get" action="/">
+  <input type="text" name="q" value="{{ q }}" placeholder="Search crop or market (e.g. Potato, Kolkata)">
+  <select name="state">
+    <option value="">All states</option>
+    {% for s in states %}<option value="{{ s }}" {{ 'selected' if s == state }}>{{ s }}</option>{% endfor %}
+  </select>
+  <button type="submit">Show prices</button>
+  {% if q or state %}<a class="btn-ghost" href="/" style="padding:11px 18px;border-radius:10px">Clear</a>{% endif %}
+</form>
+
+<div class="stats">
+  <div class="stat"><span>Crops</span><b>{{ info.commodities }}</b></div>
+  <div class="stat"><span>Markets</span><b>{{ info.markets }}</b></div>
+  <div class="stat"><span>States</span><b>{{ info.states }}</b></div>
+  <div class="stat"><span>Latest</span><b style="font-size:15px;padding-top:5px">{{ info.latest_date|nicedate }}</b></div>
+</div>
+
+<div class="cards2">
+  <div class="card">
+    <h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--up)" stroke-width="2.6"
+     stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:7px" aria-hidden="true">
+     <path d="M3 17l6-6 4 4 7-7"/><path d="M13 8h7v7"/></svg>Rising this week</h2>
+    {% if risers %}
+    <ul class="movers">
+      {% for m in risers %}
+      <li><span class="nm"><a href="/commodity/{{ m.commodity|urlencode }}{{ '?state=' + state|urlencode if state }}">{{ m.commodity }}</a></span>
+          <span><span class="pr">₹{{ m.price|rupees }}</span> <span class="pill up">{{ m.pct|delta }}%</span></span></li>
+      {% endfor %}
+    </ul>
+    {% else %}<p class="mkt">Not enough data yet to compare.</p>{% endif %}
+  </div>
+  <div class="card">
+    <h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--down)" stroke-width="2.6"
+     stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:7px" aria-hidden="true">
+     <path d="M3 7l6 6 4-4 7 7"/><path d="M13 16h7v-7"/></svg>Falling this week</h2>
+    {% if fallers %}
+    <ul class="movers">
+      {% for m in fallers %}
+      <li><span class="nm"><a href="/commodity/{{ m.commodity|urlencode }}{{ '?state=' + state|urlencode if state }}">{{ m.commodity }}</a></span>
+          <span><span class="pr">₹{{ m.price|rupees }}</span> <span class="pill down">{{ m.pct|delta }}%</span></span></li>
+      {% endfor %}
+    </ul>
+    {% else %}<p class="mkt">Not enough data yet to compare.</p>{% endif %}
+  </div>
+</div>
+
+<div class="card" id="table">
+  <h2>{% if q %}Search results{% else %}What each crop costs today{% endif %}</h2>
+  {% if rows %}
+  <div class="scroll">
+  <table class="data">
+    <thead><tr>
+      <th>Crop</th><th>Market</th><th>State</th>
+      <th class="num">Min</th><th class="num">Max</th><th class="num">Price</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><a href="/commodity/{{ r.commodity|urlencode }}{{ '?state=' + state|urlencode if state }}">{{ r.commodity }}</a>
+            {% if r.variety and r.variety not in ('—','') %}<span class="mkt"> · {{ r.variety }}</span>{% endif %}</td>
+        <td>{{ r.market }}<span class="mkt"> {{ r.district or '' }}</span></td>
+        <td class="mkt">{{ r.state }}</td>
+        <td class="num">₹{{ r.min_price|rupees }}</td>
+        <td class="num">₹{{ r.max_price|rupees }}</td>
+        <td class="num"><b>₹{{ r.modal_price|rupees }}</b></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="mkt" style="margin:12px 0 0">{{ rows|length }} matching rows. Prices are ₹ per quintal (100 kg).</p>
+  {% elif q %}
+  <div class="empty"><b>Nothing matched “{{ q }}”</b>Try “Potato”, “Onion”, “Rice”, or a market name like “Kolkata”.</div>
+  {% else %}
+  <div class="scroll">
+  <table class="data">
+    <thead><tr>
+      <th>Crop</th><th class="num">Avg price</th><th class="num">Markets</th><th>Change</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for r in summary[:28] %}
+      <tr>
+        <td><b>{{ r.commodity }}</b></td>
+        <td class="num"><b>₹{{ r.price|rupees }}</b></td>
+        <td class="num mkt">{{ r.markets }}</td>
+        <td>
+          {% if r.pct is not none %}
+            <span class="pill {{ 'up' if r.pct > 0 else ('down' if r.pct < 0 else 'flat') }}">{{ r.pct|delta }}%</span>
+          {% else %}<span class="mkt">—</span>{% endif %}
+        </td>
+        <td class="num"><a href="/commodity/{{ r.commodity|urlencode }}{{ '?state=' + state|urlencode if state }}" class="mkt">Details →</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="mkt" style="margin:12px 0 0">
+    One row per crop, averaged across markets, using each crop's most recent reported day.
+    Change compares against the previous week. Tap a crop for every market's price.
+  </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Popular crops</h2>
+  <div style="display:flex;flex-wrap:wrap;gap:8px">
+    {% for c in commodities[:30] %}
+      <a href="/commodity/{{ c.commodity|urlencode }}{{ '?state=' + state|urlencode if state }}"
+         style="background:var(--panel2);border:1px solid var(--line);border-radius:999px;
+                padding:7px 14px;font-size:14px;color:var(--ink)">
+        {{ c.commodity }} <span style="color:var(--dim2);font-size:12px">{{ c.n }}</span>
+      </a>
+    {% endfor %}
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{% if crops3d %}
+<script src="{{ url_for('static', filename='three.min.js') }}"></script>
+<script>
+(function(){
+  const DATA = {{ crops3d|tojson }};
+  const canvas = document.getElementById('hero3d');
+  if (!window.THREE || !canvas){
+    const box = canvas && canvas.parentNode;
+    if (box) box.style.display = 'none';
+    return;
+  }
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 500);
+  const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+  scene.add(new THREE.AmbientLight(0x9ab0cc, 0.95));
+  const d1 = new THREE.DirectionalLight(0xffffff, 0.9); d1.position.set(5, 9, 7); scene.add(d1);
+  const d2 = new THREE.DirectionalLight(0x4ea8ff, 0.6); d2.position.set(-6, 4, -5); scene.add(d2);
+
+  const group = new THREE.Group(); scene.add(group);
+  const colorFor = p => p < 3000 ? 0x3fbf7f : (p < 8000 ? 0xe8c15a : 0xe2694f);
+  const sorted = DATA.slice().sort((a,b) => a.avg_price - b.avg_price);
+  const mx = Math.max(...sorted.map(d => d.avg_price));
+  const spacing = 2.25, span = (sorted.length - 1) * spacing;
+
+  const bars = [];
+  sorted.forEach((d, i) => {
+    const h = 1.0 + Math.sqrt(d.avg_price / mx) * 9.0;
+    const geo = new THREE.BoxGeometry(1.5, 1, 1.5);
+    geo.translate(0, 0.5, 0);
+    const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+      color: colorFor(d.avg_price), roughness: 0.4, metalness: 0.2 }));
+    m.position.set(i * spacing - span / 2, 0, 0);
+    m.scale.y = h;
+    m.userData = {d};
+    group.add(m); bars.push(m);
+  });
+
+  let theta = 1.9, phi = 0.92, radius = 30;
+  let dragging = false, px = 0, py = 0, auto = false;
+
+  let _center = null;
+  function fitTarget(){
+    if (_center) return _center;
+    const box = new THREE.Box3();
+    bars.forEach(b => box.expandByObject(b));
+    const c = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    // the strip is long and thin: fit its width for this wide, short canvas
+    const vFov = camera.fov * Math.PI / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(camera.aspect, 0.1));
+    // worst case while spinning: the strip's full diagonal footprint
+    const needX = Math.hypot(size.x, size.z) * 0.80;
+    const needY = size.y * 1.30;
+    const rX = needX / (2 * Math.tan(hFov / 2));
+    const rY = needY / (2 * Math.tan(vFov / 2));
+    radius = Math.max(rX, rY) * 1.20;
+    _center = new THREE.Vector3(c.x, size.y * 0.5, c.z);
+    return _center;
+  }
+
+  function place(){
+    const tgt = fitTarget();
+    camera.position.set(
+      tgt.x + radius * Math.sin(phi) * Math.cos(theta),
+      tgt.y + radius * Math.cos(phi),
+      tgt.z + radius * Math.sin(phi) * Math.sin(theta));
+    camera.lookAt(tgt);
+  }
+  place();
+
+  function resize(){
+    const r = canvas.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    renderer.setSize(r.width, r.height, false);
+    camera.aspect = r.width / r.height;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', () => { resize(); _center = null; place(); });
+  resize();
+
+  canvas.addEventListener('pointerdown', e => {
+    dragging = true; auto = false; px = e.clientX; py = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointerup', e => {
+    dragging = false;
+    try { canvas.releasePointerCapture(e.pointerId); } catch(_){}
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    theta -= (e.clientX - px) * 0.008;
+    phi = Math.max(0.25, Math.min(1.4, phi - (e.clientY - py) * 0.006));
+    px = e.clientX; py = e.clientY;
+    place();
+  });
+
+  (function loop(){
+    if (auto) { theta += 0.0035; place(); }
+    renderer.render(scene, camera);
+    requestAnimationFrame(loop);
+  })();
+})();
+</script>
+{% endif %}
+{% endblock %}
