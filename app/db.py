@@ -181,14 +181,17 @@ def upsert_many(rows, batch=20000, track_history=True):
        at 1.5M rows it runs 75+ times over a growing table, which cost more
        than the inserts themselves. sqlite's rowcount tells us enough.
     """
-    if not rows:
-        return 0, 0
-
     changed = 0
+    buf = []
     with session(bulk=True) as c:
-        for i in range(0, len(rows), batch):
-            chunk = [_row_tuple(r) for r in rows[i:i + batch]]
-            cur = c.executemany(UPSERT_SQL, chunk)
+        for r in rows:                      # accepts a list or a generator
+            buf.append(_row_tuple(r))
+            if len(buf) >= batch:
+                cur = c.executemany(UPSERT_SQL, buf)
+                changed += max(cur.rowcount, 0)
+                buf = []
+        if buf:
+            cur = c.executemany(UPSERT_SQL, buf)
             changed += max(cur.rowcount, 0)
     # An UPSERT reports 1 for insert and 1 for update, so the total is a good
     # enough "rows written" figure without paying for a table scan.
