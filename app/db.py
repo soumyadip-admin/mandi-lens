@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS runs (
     message    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS locks (
+    name       TEXT PRIMARY KEY,
+    holder     TEXT,
+    acquired_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS price_history (
     price_id    INTEGER NOT NULL,
     modal_price REAL,

@@ -81,6 +81,56 @@ def _too_soon():
 
 HISTORY_FILE = os.path.join(config.BASE_DIR, "data", "real", "market_history.parquet")
 
+# A thread lock only guards one worker. gunicorn runs several, and they all
+# share one SQLite file, so the guard has to live in the database. This row is
+# the cross-process mutex: whoever holds it does the load.
+LOCK_ROW = "__bootstrap_lock__"
+
+
+def _acquire_db_lock(minutes=25):
+    """
+    Take a cross-process lock. Returns True if this worker won the race.
+
+    gunicorn runs several workers and they all share one SQLite file, so a
+    thread lock is not enough. This uses a dedicated `locks` table with `name`
+    as the primary key: INSERT OR IGNORE only ignores on a *real* constraint,
+    which is what makes rowcount a reliable "did I win?" signal.
+    """
+    me = f"{os.getpid()}@{datetime.now().strftime('%H:%M:%S')}"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with db.session() as c:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO locks(name, holder, acquired_at) VALUES(?,?,?)",
+                ("history_load", me, now))
+            if cur.rowcount == 1:
+                return True                       # we took the lock
+
+            row = c.execute(
+                "SELECT acquired_at FROM locks WHERE name='history_load'").fetchone()
+            if not row:
+                return True
+            try:
+                started = datetime.strptime(row["acquired_at"], "%Y-%m-%d %H:%M:%S")
+                age_min = (datetime.now() - started).total_seconds() / 60
+            except (ValueError, TypeError):
+                age_min = 0
+            if age_min > minutes:                 # stale lock, take it over
+                c.execute("UPDATE locks SET holder=?, acquired_at=? WHERE name=?",
+                          (me, now, "history_load"))
+                return True
+            return False
+    except Exception:
+        return True                               # never break a boot on the lock
+
+
+def _release_db_lock():
+    try:
+        with db.session() as c:
+            c.execute("DELETE FROM locks WHERE name='history_load'")
+    except Exception:
+        pass
+
 
 def _load_bundled_history():
     """
@@ -93,9 +143,16 @@ def _load_bundled_history():
     """
     if not os.path.exists(HISTORY_FILE):
         return None
+    if not _acquire_db_lock():
+        print("[refresh] history load already running in another worker — standing by",
+              flush=True)
+        return None
     from ingest.loadfile import load
     print("[refresh] loading bundled full history (1.48M rows) in background …", flush=True)
-    load(HISTORY_FILE, verbose=False)
+    try:
+        load(HISTORY_FILE, verbose=False)
+    finally:
+        _release_db_lock()
     n = db.stats().get("n") or 0
     print(f"[refresh] bundled history loaded — {n:,} rows", flush=True)
     return n
