@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,6 +19,21 @@ class TestWeb(unittest.TestCase):
         from ingest.fetch import run
         run("fixture", verbose=False)
         cls.c = app.test_client()
+
+    def test_health_is_instant_while_loading(self):
+        """A health check during a history load must not touch the database."""
+        from app import refresh
+        refresh.LOADING.set()
+        try:
+            t0 = time.time()
+            r = self.c.get("/health")
+            elapsed = time.time() - t0
+            self.assertEqual(r.status_code, 200)
+            self.assertTrue(r.get_json()["ok"])
+            self.assertTrue(r.get_json()["loading"])
+            self.assertLess(elapsed, 0.5)
+        finally:
+            refresh.LOADING.clear()
 
     def test_health(self):
         r = self.c.get("/health")
@@ -75,6 +91,15 @@ class TestWeb(unittest.TestCase):
 
     def test_about(self):
         self.assertEqual(self.c.get("/about").status_code, 200)
+
+    def test_cross_process_lock_blocks_second_worker(self):
+        """Two gunicorn workers must not load the history at the same time."""
+        from app import refresh
+        self.assertTrue(refresh._acquire_db_lock(), "first worker should win")
+        self.assertFalse(refresh._acquire_db_lock(), "second worker must stand by")
+        refresh._release_db_lock()
+        self.assertTrue(refresh._acquire_db_lock(), "lock must be reusable")
+        refresh._release_db_lock()
 
     def test_refresh_retries_after_file_seed(self):
         """A file-seeded database must still be considered worth refreshing."""
