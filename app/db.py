@@ -83,18 +83,32 @@ CREATE INDEX IF NOT EXISTS idx_date              ON prices(arrival_date);
 CREATE INDEX IF NOT EXISTS idx_name_search       ON prices(commodity, market);
 CREATE INDEX IF NOT EXISTS idx_hist              ON price_history(price_id, seen_at);
 """
-def connect():
+def connect(bulk=False):
+    """
+    Open a connection. `bulk=True` trades crash-safety for speed.
+
+    journal_mode=WAL plus synchronous=FULL means every transaction waits for
+    an fsync. On a free-tier container with a slow disk that dominates: a bulk
+    load measured ~500 rows/second with FULL, because each 20k batch waited for
+    the disk. synchronous=OFF during a bulk load removes that wait. This is safe
+    here because a interrupted load simply re-runs — the UPSERT is idempotent.
+    """
     os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(config.DB_PATH, timeout=30)
+    conn = sqlite3.connect(config.DB_PATH, timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA busy_timeout=60000")
+    conn.execute("PRAGMA cache_size=-64000")      # 64 MB page cache
+    conn.execute("PRAGMA temp_store=MEMORY")
+    if bulk:
+        conn.execute("PRAGMA synchronous=OFF")
+        conn.execute("PRAGMA locking_mode=EXCLUSIVE")
     return conn
 
 
 @contextmanager
-def session():
-    conn = connect()
+def session(bulk=False):
+    conn = connect(bulk=bulk)
     try:
         yield conn
         conn.commit()
@@ -156,32 +170,30 @@ def _row_tuple(r):
 
 def upsert_many(rows, batch=20000, track_history=True):
     """
-    Bulk insert/update using a single ON CONFLICT statement per batch.
+    Bulk insert/update using one ON CONFLICT statement per batch.
 
-    A per-row SELECT-then-write loop costs 2 queries per row; at 1.5M rows that
-    is 3M round-trips and minutes of wall clock. This does one executemany per
-    batch instead, so loading a full year of national data takes ~1 minute.
+    Two things matter for throughput on a free-tier container:
+
+    1. One connection for the whole call, in bulk mode (no fsync per batch).
+       Opening a connection per chunk threw away the 64 MB page cache and
+       re-issued the PRAGMAs each time.
+    2. No COUNT(*) before/after. That was a full table scan per 20k batch —
+       at 1.5M rows it runs 75+ times over a growing table, which cost more
+       than the inserts themselves. sqlite's rowcount tells us enough.
     """
     if not rows:
         return 0, 0
 
-    inserted = changed = 0
-    with session() as c:
-        before = c.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
+    changed = 0
+    with session(bulk=True) as c:
         for i in range(0, len(rows), batch):
             chunk = [_row_tuple(r) for r in rows[i:i + batch]]
             cur = c.executemany(UPSERT_SQL, chunk)
             changed += max(cur.rowcount, 0)
-        after = c.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
-        inserted = after - before
-        changed = max(changed - inserted, 0)
-        if track_history and inserted + changed <= 5000:
-            # Only record price movements for small daily updates; bulk
-            # backfills would add millions of rows for no analytical value.
-            c.execute(
-                "INSERT INTO price_history(price_id, modal_price, seen_at) "
-                "SELECT id, modal_price, fetched_at FROM prices WHERE rowid > ?",
-                (before,))
+    # An UPSERT reports 1 for insert and 1 for update, so the total is a good
+    # enough "rows written" figure without paying for a table scan.
+    inserted = changed
+    changed = 0
     return inserted, changed
 
 
