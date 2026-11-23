@@ -160,6 +160,9 @@ def load(path_or_url, limit=None, verbose=True):
         # Build indexes once, after the bulk load. Doing it up-front makes a
         # 1.48M-row insert several times slower here and on the server.
         db.build_indexes(verbose=verbose)
+        # Pay the expensive aggregate once, here, so every page render
+        # afterwards reads one stored row instead of scanning 1.48M.
+        db.recompute_stats()
         db.finish_run(run_id, "ok", total_read, ins, upd,
                       f"file:{os.path.basename(str(path_or_url))}")
         if verbose:
