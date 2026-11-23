@@ -52,26 +52,64 @@ DATE_FORMATS = ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d %b %Y", "%Y/%m/%d",
                 "%d-%b-%Y", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"]
 
 
+_NORM_RE = re.compile(r"[^a-z]")
+_norm_cache = {}
+
+
 def _norm_key(k):
-    return re.sub(r"[^a-z]", "", str(k).lower())
+    """Lowercase and strip non-letters. Cached — this runs millions of times."""
+    try:
+        return _norm_cache[k]
+    except KeyError:
+        v = _NORM_RE.sub("", str(k).lower())
+        _norm_cache[k] = v
+        return v
+
+
+# Pre-compute the alias table once at import instead of per record.
+_ALIAS_LOOKUP = {}
+for _canonical, _aliases in FIELD_ALIASES.items():
+    for _a in _aliases:
+        _ALIAS_LOOKUP[_norm_key(_a)] = _canonical
 
 
 def build_keymap(record):
-    """Map this record's actual keys onto our canonical field names."""
-    lookup = {_norm_key(k): k for k in record.keys()}
+    """
+    Map this record's actual keys onto our canonical field names.
+
+    The old version ran a regex over every alias for every record: 20 regexes
+    x 1.48M rows. The alias table is now normalised once at import, so this is
+    a dict lookup per key.
+    """
     out = {}
-    for canonical, aliases in FIELD_ALIASES.items():
-        for a in aliases:
-            k = _norm_key(a)
-            if k in lookup:
-                out[canonical] = lookup[k]
-                break
+    for k in record.keys():
+        canonical = _ALIAS_LOOKUP.get(_norm_key(k))
+        if canonical is not None and canonical not in out:
+            out[canonical] = k
     return out
 
 
+_date_cache = {}
+
+
 def parse_date(raw):
+    """
+    Parse a date. Memoised: a dataset has a few hundred distinct dates but
+    millions of rows, and strptime is expensive.
+    """
     if raw is None:
         return None
+    key = raw if isinstance(raw, str) else str(raw)
+    try:
+        return _date_cache[key]
+    except KeyError:
+        pass
+    result = _parse_date_uncached(raw)
+    _date_cache[key] = result
+    return result
+
+
+def _parse_date_uncached(raw):
     s = str(raw).strip()
     if not s:
         return None
@@ -92,9 +130,27 @@ def parse_date(raw):
     return None
 
 
+_price_cache = {}
+
+
 def parse_price(raw):
     if raw is None:
         return None
+    if isinstance(raw, float):
+        return raw if raw >= 0 else None
+    try:
+        return _price_cache[raw]
+    except (KeyError, TypeError):
+        pass
+    v = _parse_price_uncached(raw)
+    try:
+        _price_cache[raw] = v
+    except TypeError:
+        pass
+    return v
+
+
+def _parse_price_uncached(raw):
     s = str(raw).strip().replace(",", "").replace("\u20b9", "").strip()
     if s in ("", "-", "NA", "N/A", "NR", "None", "null"):
         return None
@@ -116,8 +172,17 @@ def normalise(records, source):
     """Turn raw API records into clean rows. Returns (rows, rejects)."""
     rows, rejects = [], 0
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Records from one payload share the same columns, so the keymap is
+    # identical for every row. Building it once per distinct column set turns
+    # 1.48M lookups into a handful.
+    _km = None
+    _km_cols = None
     for rec in records:
-        km = build_keymap(rec)
+        cols = rec.keys()
+        if _km_cols != cols:
+            _km_cols = cols
+            _km = build_keymap(rec)
+        km = _km
         if "state" not in km or "commodity" not in km:
             rejects += 1
             continue
