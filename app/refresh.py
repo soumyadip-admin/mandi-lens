@@ -18,6 +18,7 @@ Set MANDI_AUTO_REFRESH=0 to disable it completely.
 """
 import os
 import threading
+import time
 import traceback
 from datetime import datetime
 
@@ -25,6 +26,10 @@ from app import config, db
 
 _lock = threading.Lock()
 _last_attempt = None
+
+# Set while the bundled history is being loaded. /health reads this so a
+# health check never has to run 1.5M-row aggregates mid-load.
+LOADING = threading.Event()
 
 AUTO_REFRESH = os.environ.get("MANDI_AUTO_REFRESH", "1") not in ("0", "false", "False")
 # 0 means "no page limit" — a full national pull.
@@ -150,8 +155,23 @@ def _load_bundled_history():
     from ingest.loadfile import load
     print("[refresh] loading bundled full history (1.48M rows) in background …", flush=True)
     try:
+        import resource
+        _soft, _ = resource.getrlimit(resource.RLIMIT_AS)
+        _lim = "unlimited" if _soft < 0 else f"{_soft/1e6:.0f} MB"
+        print(f"[refresh] memory limit on this instance: {_lim}", flush=True)
+    except Exception:
+        pass
+    LOADING.set()
+    try:
         load(HISTORY_FILE, verbose=False)
+        try:
+            import resource
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(f"[refresh] peak RSS during load: {peak:.0f} MB", flush=True)
+        except Exception:
+            pass
     finally:
+        LOADING.clear()
         _release_db_lock()
     n = db.stats().get("n") or 0
     print(f"[refresh] bundled history loaded — {n:,} rows", flush=True)
@@ -160,6 +180,7 @@ def _load_bundled_history():
 
 def _worker():
     global _last_attempt
+    LOADING.set()
     try:
         from ingest import fetch
         # Never fall back to the synthetic fixture during a refresh — mixing
@@ -184,15 +205,31 @@ def _worker():
         traceback.print_exc()
     finally:
         _last_attempt = datetime.now()
+        LOADING.clear()
         _lock.release()
 
 
+_thin_cache = {"at": 0.0, "val": False}
+
+
 def _thin():
-    """True when we're running on the tiny single-day seed rather than history."""
+    """
+    True when we're running on the tiny single-day seed rather than history.
+
+    db.stats() is four COUNT(DISTINCT ...) scans over 1.48M rows. maybe_refresh
+    calls this on every request, so it is cached for 10 s; nothing about the
+    answer changes meaningfully in that window.
+    """
+    now = time.time()
+    if _thin_cache["at"] and now - _thin_cache["at"] < 10.0:
+        return _thin_cache["val"]
     try:
-        return (db.stats().get("n") or 0) < 100000
+        val = (db.stats().get("n") or 0) < 100000
     except Exception:
-        return False
+        val = False
+    _thin_cache["at"] = now
+    _thin_cache["val"] = val
+    return val
 
 
 def maybe_refresh():

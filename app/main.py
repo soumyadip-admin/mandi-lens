@@ -1,5 +1,6 @@
 """Mandi Lens — a clean front-end for India's open mandi price data."""
 import os
+import time
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request, abort
@@ -50,8 +51,24 @@ def nicedate(d):
         return d
 
 
+_fresh_cache = {"at": 0.0, "info": None}
+_FRESH_TTL = 15.0
+
+
 def freshness():
-    """How old is our data, and should we warn the user?"""
+    """
+    How old is our data, and should we warn the user?
+
+    db.stats() runs four COUNT(DISTINCT ...) aggregates plus MIN/MAX over
+    1.48M rows — roughly a second of CPU. It was being called on every page
+    render *and* on every Render health check, which is what made the instance
+    look dead while a load was in flight. A 15-second cache keeps health checks
+    instant without anyone noticing the staleness.
+    """
+    now = time.time()
+    if _fresh_cache["info"] is not None and now - _fresh_cache["at"] < _FRESH_TTL:
+        return _fresh_cache["info"]
+
     d = db.stats()
     last = db.last_run()
     info = {
@@ -82,6 +99,8 @@ def freshness():
         "fixture": "Offline demo sample — synthetic data for trying the interface.",
     }.get(src, "Data source unknown.")
     info["is_live"] = (src == "live")
+    _fresh_cache["at"] = now
+    _fresh_cache["info"] = info
     return info
 
 
@@ -110,6 +129,45 @@ def sparkline(series, w=560, h=120):
     }
 
 
+_crops_cache = {"at": 0.0, "data": None}
+
+
+def _crops3d():
+    """
+    The ten crops drawn in the 3D field.
+
+    This is a GROUP BY over all 1.48M rows — about a second. It was running on
+    every single home page load, which is why the page crawled while a load was
+    in flight. The answer only changes when new data lands, so cache it for a
+    minute and short-circuit entirely while a load is running.
+    """
+    now = time.time()
+    if _crops_cache["data"] is not None and now - _crops_cache["at"] < 60:
+        return _crops_cache["data"]
+    if refresh.LOADING.is_set() or db.bulk_load_in_progress():
+        return _crops_cache["data"] or []
+    try:
+        with db.session() as c:
+            data = [dict(r) for r in c.execute(
+                """
+                SELECT commodity,
+                       ROUND(AVG(modal_price), 0) AS avg_price,
+                       COUNT(DISTINCT market)     AS markets,
+                       COUNT(*)                   AS n
+                FROM prices
+                WHERE modal_price BETWEEN 1 AND 100000
+                GROUP BY commodity
+                HAVING n > 0
+                ORDER BY n DESC
+                LIMIT 10
+                """).fetchall()]
+    except Exception:
+        data = _crops_cache["data"] or []
+    _crops_cache["at"] = now
+    _crops_cache["data"] = data
+    return data
+
+
 # ------------------------------------------------------------------ routes
 @app.route("/")
 def index():
@@ -132,24 +190,7 @@ def index():
     if q:
         rows = db.search(state=state, q=q, limit=60)
 
-    crops3d = []
-    try:
-        with db.session() as c:
-            crops3d = [dict(r) for r in c.execute(
-                """
-                SELECT commodity,
-                       ROUND(AVG(modal_price), 0) AS avg_price,
-                       COUNT(DISTINCT market)     AS markets,
-                       COUNT(*)                   AS n
-                FROM prices
-                WHERE modal_price BETWEEN 1 AND 100000
-                GROUP BY commodity
-                HAVING n > 0
-                ORDER BY n DESC
-                LIMIT 10
-                """).fetchall()]
-    except Exception:
-        crops3d = []
+    crops3d = _crops3d()
 
     return render_template("index.html", crops3d=crops3d, info=info, states=db.states(),
                            state=state or "", q=q or "", commodities=commodities,
@@ -264,10 +305,28 @@ def _kick_refresh():
 
 @app.route("/health")
 def health():
+    """
+    Render's health check. Must answer in milliseconds even while the history
+    is loading — a slow reply here gets the service marked unhealthy and
+    restarted, which is what threw away the load over and over.
+    """
+    if refresh.LOADING.is_set() or db.history_load_running():
+        # Reuse the last known numbers rather than recomputing them: the point
+        # of this branch is to answer instantly, not to be fresh.
+        last_known = _fresh_cache["info"] or {}
+        return jsonify({"ok": True, "loading": True,
+                        "records": last_known.get("records", 0),
+                        "latest_date": last_known.get("latest_date"),
+                        "stale": last_known.get("stale", False),
+                        "last_run": last_known.get("run"),
+                        "detail": "importing bundled history",
+                        "generated_at":
+                        datetime.now(timezone.utc).isoformat(timespec="seconds")})
     i = freshness()
     return jsonify({"ok": i["records"] > 0, "records": i["records"],
                     "latest_date": i["latest_date"], "stale": i["stale"],
-                    "last_run": i["run"], "generated_at":
+                    "last_run": i["run"], "loading": False,
+                    "generated_at":
                     datetime.now(timezone.utc).isoformat(timespec="seconds")})
 
 

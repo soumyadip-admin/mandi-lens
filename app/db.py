@@ -1,4 +1,5 @@
 """SQLite storage layer. One table, indexed for the queries the UI actually runs."""
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -33,6 +34,11 @@ CREATE TABLE IF NOT EXISTS runs (
     inserted   INTEGER DEFAULT 0,
     updated    INTEGER DEFAULT 0,
     message    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS locks (
@@ -98,11 +104,23 @@ def connect(bulk=False):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=60000")
-    conn.execute("PRAGMA cache_size=-64000")      # 64 MB page cache
-    conn.execute("PRAGMA temp_store=MEMORY")
     if bulk:
+        # Generous page cache and an on-disk temp store are fine while we are
+        # inserting, and must be: building 9 indexes over 1.48M rows needs a
+        # sort workspace that would otherwise be allocated in RAM.
+        conn.execute("PRAGMA cache_size=-64000")   # 64 MB page cache
+        conn.execute("PRAGMA temp_store=FILE")
         conn.execute("PRAGMA synchronous=OFF")
-        conn.execute("PRAGMA locking_mode=EXCLUSIVE")
+        # Deliberately NOT locking_mode=EXCLUSIVE: it makes the database
+        # unreadable to the other worker for the whole load, so every health
+        # check blocked for a second or more and Render saw a sick service.
+    else:
+        # Serving pages. Stay deliberately small: this process shares a 512 MB
+        # container with the loader thread and any other gunicorn worker, and
+        # a big page cache here is what pushed it over the limit and produced
+        # the 502s.
+        conn.execute("PRAGMA cache_size=-8000")    # 8 MB page cache
+        conn.execute("PRAGMA temp_store=FILE")
     return conn
 
 
@@ -220,7 +238,36 @@ def last_run():
         return dict(r) if r else None
 
 
-def stats():
+def recompute_stats():
+    """
+    Compute the headline numbers once and store them.
+
+    stats() is four COUNT(DISTINCT ...) scans plus MIN/MAX over 1.48M rows —
+    about 0.65 s. It was being run on every page render, which is why the home
+    page took 3.5 s. We pay that cost once, at the end of a load, and read the
+    answer from `meta` afterwards.
+    """
+    with session() as c:
+        row = c.execute(
+            "SELECT COUNT(*) n, COUNT(DISTINCT commodity) c, COUNT(DISTINCT state) s, "
+            "COUNT(DISTINCT market) m, MIN(arrival_date) dmin, MAX(arrival_date) dmax "
+            "FROM prices").fetchone()
+        payload = json.dumps(dict(row))
+        c.execute("DELETE FROM meta WHERE key LIKE 'summary:%'")
+        c.execute("INSERT INTO meta(key, value) VALUES('stats', ?) "
+                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (payload,))
+    return dict(row)
+
+
+def stats(use_cache=True):
+    if use_cache:
+        try:
+            with session() as c:
+                r = c.execute("SELECT value FROM meta WHERE key='stats'").fetchone()
+            if r:
+                return json.loads(r["value"])
+        except Exception:
+            pass
     with session() as c:
         row = c.execute(
             "SELECT COUNT(*) n, COUNT(DISTINCT commodity) c, COUNT(DISTINCT state) s, "
@@ -229,13 +276,54 @@ def stats():
         return dict(row)
 
 
+def history_load_running():
+    """
+    Cross-process 'the bundled history is being imported' flag.
+
+    A threading.Event only exists inside one gunicorn worker, but the load runs
+    in one worker while the other one serves the health checks. Reading the
+    lock row the loader holds gives every worker the same answer, cheaply.
+    """
+    try:
+        with session() as c:
+            row = c.execute(
+                "SELECT 1 FROM locks WHERE name='history_load'").fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def bulk_load_in_progress():
+    """
+    True when the table is big but the indexes are not there yet.
+
+    That is exactly the window during a bundled-history load. Scans in that
+    window are what turned the site into a wall of 502s, so the heavy listing
+    queries return empty (and the templates fall back to the seed snapshot)
+    instead of queueing for a minute behind a full table scan. With a small
+    table — the seed, the fixtures, the tests — this is always False.
+    """
+    try:
+        if has_indexes():
+            return False
+        with session() as c:
+            n = c.execute("SELECT COUNT(*) n FROM prices").fetchone()["n"]
+        return n > 300000
+    except Exception:
+        return False
+
+
 def states():
+    if bulk_load_in_progress():
+        return []
     with session() as c:
         return [r[0] for r in c.execute(
             "SELECT DISTINCT state FROM prices ORDER BY state")]
 
 
 def commodities(state=None, limit=400):
+    if bulk_load_in_progress():
+        return []
     with session() as c:
         if state:
             q = ("SELECT commodity, COUNT(*) n FROM prices WHERE state=? "
@@ -260,6 +348,8 @@ def latest_date(state=None, commodity=None):
 
 def search(commodity=None, state=None, district=None, q=None,
            date_from=None, date_to=None, sort="date", limit=200):
+    if bulk_load_in_progress():
+        return []
     sql = ["SELECT * FROM prices WHERE 1=1"]
     args = []
     if commodity:
@@ -302,6 +392,22 @@ def commodity_trend(commodity, state=None, days=400):
 
 def summary(state=None, limit=40):
     """One row per crop: markets reporting, latest average price, week-on-week change."""
+    if bulk_load_in_progress():
+        return []
+    # ~0.5 s of correlated subqueries over 1.48M rows. The result only changes
+    # when new data lands, so serve a stored copy when we have one.
+    key = f"summary:{state or '*'}:{limit}"
+    try:
+        with session() as c:
+            r = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        if r:
+            return json.loads(r["value"])
+    except Exception:
+        pass
+    return _summary_uncached(state, limit)
+
+
+def _summary_uncached(state=None, limit=40):
     clause = "AND state = ?" if state else ""
     sql = f"""
     WITH bounds AS (
@@ -336,6 +442,14 @@ def summary(state=None, limit=40):
         out.append({"commodity": r["commodity"],
                     "price": round(r["cur_avg"], 0) if r["cur_avg"] is not None else None,
                     "markets": r["markets"], "pct": pct})
+    key = f"summary:{state or '*'}:{limit}"
+    try:
+        with session() as c:
+            c.execute("INSERT INTO meta(key, value) VALUES(?, ?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (key, json.dumps(out)))
+    except Exception:
+        pass
     return out
 
 
