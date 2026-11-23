@@ -34,16 +34,42 @@ MIN_GAP_MINUTES = int(os.environ.get("MANDI_MIN_GAP_MINUTES", "30") or 30)
 
 
 def is_stale():
-    """True when the newest data is older than the configured threshold."""
+    """
+    True when a refresh is worth attempting.
+
+    Three separate questions, and any 'yes' means refresh:
+
+      1. Has anything ever been imported?
+      2. Is the newest *price date* older than the threshold? This is the one
+         that matters — a database seeded from a single-day file can have a
+         very recent import timestamp while holding year-old prices.
+      3. Was the last import a fallback (file/fixture) rather than the live
+         feed? If so, the live pull never succeeded and is worth retrying.
+    """
     last = db.last_run()
     if not last or not last.get("ended_at"):
         return True
+
+    # (3) last import wasn't live
+    if (last.get("source") or "").split(":")[0] != "live":
+        return True
+
+    # (2) the data itself is old
+    try:
+        dmax = db.stats().get("dmax")
+        if dmax:
+            newest = datetime.strptime(dmax, "%Y-%m-%d")
+            if (datetime.now() - newest).total_seconds() / 3600 > config.STALE_AFTER_HOURS:
+                return True
+    except (ValueError, TypeError):
+        return True
+
+    # (1) import timestamp
     try:
         ended = datetime.strptime(last["ended_at"], "%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         return True
-    age_h = (datetime.now() - ended).total_seconds() / 3600
-    return age_h > config.STALE_AFTER_HOURS
+    return (datetime.now() - ended).total_seconds() / 3600 > config.STALE_AFTER_HOURS
 
 
 def _too_soon():
@@ -53,13 +79,49 @@ def _too_soon():
     return (datetime.now() - _last_attempt).total_seconds() < MIN_GAP_MINUTES * 60
 
 
+HISTORY_FILE = os.path.join(config.BASE_DIR, "data", "real", "market_history.parquet")
+
+
+def _load_bundled_history():
+    """
+    Load the full bundled history if the live API is unreachable.
+
+    The government API does not route from cloud hosts ([Errno 113] No route to
+    host), so on a hosted deployment the live pull will always fail. The same
+    data is committed to the repo as a parquet file, which we can read locally.
+    This runs in the background so a 2-minute load never blocks a page.
+    """
+    if not os.path.exists(HISTORY_FILE):
+        return None
+    from ingest.loadfile import load
+    print("[refresh] loading bundled full history (1.48M rows) in background …", flush=True)
+    load(HISTORY_FILE, verbose=False)
+    n = db.stats().get("n") or 0
+    print(f"[refresh] bundled history loaded — {n:,} rows", flush=True)
+    return n
+
+
 def _worker():
     global _last_attempt
     try:
         from ingest import fetch
-        mode = "live" if config.DATA_GOV_API_KEY else "auto"
-        status = fetch.run(mode, limit_pages=(REFRESH_PAGES or None), verbose=False)
-        print(f"[refresh] finished status={status} rows={db.stats().get('n')}", flush=True)
+        # Never fall back to the synthetic fixture during a refresh — mixing
+        # demo rows into a real dataset corrupts the max date and the movers.
+        mode = "live"
+        live_ok = False
+        try:
+            status = fetch.run(mode, limit_pages=(REFRESH_PAGES or None), verbose=False)
+            last = db.last_run() or {}
+            live_ok = (last.get("source") or "").split(":")[0] == "live"
+            print(f"[refresh] fetch finished status={status} source={last.get('source')} "
+                  f"rows={db.stats().get('n'):,}", flush=True)
+        except Exception as e:
+            print(f"[refresh] fetch failed ({e.__class__.__name__}: {e})", flush=True)
+
+        # If we couldn't get the live feed, the bundled full history is the
+        # real dataset. Load it — that is what makes the site worth looking at.
+        if not live_ok:
+            _load_bundled_history()
     except Exception:
         print("[refresh] failed (site keeps serving existing data)", flush=True)
         traceback.print_exc()
@@ -68,14 +130,28 @@ def _worker():
         _lock.release()
 
 
+def _thin():
+    """True when we're running on the tiny single-day seed rather than history."""
+    try:
+        return (db.stats().get("n") or 0) < 100000
+    except Exception:
+        return False
+
+
 def maybe_refresh():
     """
     Fire-and-forget. Returns True if a refresh was started, False otherwise.
     Safe to call on every request — it is cheap when there's nothing to do.
     """
     global _last_attempt
-    if not AUTO_REFRESH or not config.DATA_GOV_API_KEY:
+    if not AUTO_REFRESH:
         return False
+    # A thin database is always worth topping up, even with no API key — the
+    # bundled history is local, so there is nothing to be polite about.
+    if _thin() and not _too_soon() and _lock.acquire(blocking=False):
+        _last_attempt = datetime.now()
+        threading.Thread(target=_worker, name="mandi-refresh", daemon=True).start()
+        return True
     if not is_stale() or _too_soon():
         return False
     if not _lock.acquire(blocking=False):

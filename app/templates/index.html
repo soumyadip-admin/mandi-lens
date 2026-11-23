@@ -41,7 +41,7 @@ Pick a crop to see what it's selling for, market by market.</p>
           <span><span class="pr">₹{{ m.price|rupees }}</span> <span class="pill up">{{ m.pct|delta }}%</span></span></li>
       {% endfor %}
     </ul>
-    {% else %}<p class="mkt">Not enough data yet to compare.</p>{% endif %}
+    {% else %}<p class="mkt">This dataset covers a single day, so week-on-week movement can’t be computed. The live national feed fills this in.</p>{% endif %}
   </div>
   <div class="card">
     <h2><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--down)" stroke-width="2.6"
@@ -54,7 +54,7 @@ Pick a crop to see what it's selling for, market by market.</p>
           <span><span class="pr">₹{{ m.price|rupees }}</span> <span class="pill down">{{ m.pct|delta }}%</span></span></li>
       {% endfor %}
     </ul>
-    {% else %}<p class="mkt">Not enough data yet to compare.</p>{% endif %}
+    {% else %}<p class="mkt">This dataset covers a single day, so week-on-week movement can’t be computed. The live national feed fills this in.</p>{% endif %}
   </div>
 </div>
 

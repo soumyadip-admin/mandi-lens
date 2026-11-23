@@ -14,29 +14,20 @@ CREATE TABLE IF NOT EXISTS prices (
     commodity   TEXT NOT NULL,
     variety     TEXT,
     grade       TEXT,
-    arrival_date TEXT,          -- normalised to YYYY-MM-DD
+    arrival_date TEXT NOT NULL,
     min_price   REAL,
     max_price   REAL,
     modal_price REAL,
-    source      TEXT NOT NULL,  -- 'live' or 'fixture'
-    fetched_at  TEXT NOT NULL,  -- ISO timestamp
+    source      TEXT NOT NULL,
+    fetched_at  TEXT NOT NULL,
     UNIQUE(state, market, commodity, variety, arrival_date)
 );
-
-CREATE INDEX IF NOT EXISTS idx_commodity_state  ON prices(commodity, state);
-CREATE INDEX IF NOT EXISTS idx_commodity_arrival ON prices(commodity, arrival_date DESC);
-CREATE INDEX IF NOT EXISTS idx_state_market      ON prices(state, market);
-CREATE INDEX IF NOT EXISTS idx_arrival_desc      ON prices(arrival_date DESC);
-CREATE INDEX IF NOT EXISTS idx_modal             ON prices(commodity, modal_price);
-CREATE INDEX IF NOT EXISTS idx_state_date      ON prices(state, arrival_date);
-CREATE INDEX IF NOT EXISTS idx_date            ON prices(arrival_date);
-CREATE INDEX IF NOT EXISTS idx_name_search     ON prices(commodity, market);
 
 CREATE TABLE IF NOT EXISTS runs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
     ended_at   TEXT,
-    status     TEXT NOT NULL,   -- running | ok | partial | failed
+    status     TEXT NOT NULL,
     source     TEXT,
     fetched    INTEGER DEFAULT 0,
     inserted   INTEGER DEFAULT 0,
@@ -44,10 +35,18 @@ CREATE TABLE IF NOT EXISTS runs (
     message    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS price_history (
+    price_id    INTEGER NOT NULL,
+    modal_price REAL,
+    seen_at     TEXT NOT NULL
+);
+"""
+
+# Full-text search. Kept separate so a database can be created with it.
+FTS = """
 CREATE VIRTUAL TABLE IF NOT EXISTS prices_fts USING fts5(
     market, commodity, district, content='prices', content_rowid='id'
 );
-
 CREATE TRIGGER IF NOT EXISTS prices_ai AFTER INSERT ON prices BEGIN
   INSERT INTO prices_fts(rowid, market, commodity, district)
   VALUES (new.id, new.market, new.commodity, new.district);
@@ -62,16 +61,22 @@ CREATE TRIGGER IF NOT EXISTS prices_au AFTER UPDATE ON prices BEGIN
   INSERT INTO prices_fts(rowid, market, commodity, district)
   VALUES (new.id, new.market, new.commodity, new.district);
 END;
-
-CREATE TABLE IF NOT EXISTS price_history (
-    price_id   INTEGER NOT NULL,
-    modal_price REAL,
-    seen_at    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_hist ON price_history(price_id, seen_at);
 """
 
-
+# Indexes are created AFTER a bulk load. Building them up-front makes a
+# 1.48M-row insert several times slower, because every row maintains every
+# index. Load first, index once, then the queries are fast forever.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_commodity_state   ON prices(commodity, state);
+CREATE INDEX IF NOT EXISTS idx_commodity_arrival ON prices(commodity, arrival_date DESC);
+CREATE INDEX IF NOT EXISTS idx_state_market      ON prices(state, market);
+CREATE INDEX IF NOT EXISTS idx_arrival_desc      ON prices(arrival_date DESC);
+CREATE INDEX IF NOT EXISTS idx_modal             ON prices(commodity, modal_price);
+CREATE INDEX IF NOT EXISTS idx_state_date        ON prices(state, arrival_date);
+CREATE INDEX IF NOT EXISTS idx_date              ON prices(arrival_date);
+CREATE INDEX IF NOT EXISTS idx_name_search       ON prices(commodity, market);
+CREATE INDEX IF NOT EXISTS idx_hist              ON price_history(price_id, seen_at);
+"""
 def connect():
     os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
     conn = sqlite3.connect(config.DB_PATH, timeout=30)
@@ -91,9 +96,30 @@ def session():
         conn.close()
 
 
-def init():
+def init(with_fts=True):
+    """Create tables. Indexes are deferred to build_indexes() after a bulk load."""
     with session() as c:
         c.executescript(SCHEMA)
+        if with_fts:
+            c.executescript(FTS)
+
+
+def build_indexes(verbose=False):
+    """Build all indexes in one pass. Call this after a bulk insert."""
+    with session() as c:
+        if verbose:
+            print("  … building indexes", flush=True)
+        c.executescript(INDEXES)
+    if verbose:
+        print("  … indexes built", flush=True)
+
+
+def has_indexes():
+    with session() as c:
+        n = c.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_commodity_state'"
+        ).fetchone()[0]
+        return bool(n)
 
 
 UPSERT_SQL = """

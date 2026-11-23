@@ -145,6 +145,9 @@ def load(path_or_url, limit=None, verbose=True):
 
         if total_clean == 0:
             raise ValueError("no usable rows after cleaning — check the column names")
+        # Build indexes once, after the bulk load. Doing it up-front makes a
+        # 1.48M-row insert several times slower here and on the server.
+        db.build_indexes(verbose=verbose)
         db.finish_run(run_id, "ok", total_read, ins, upd,
                       f"file:{os.path.basename(str(path_or_url))}")
         if verbose:

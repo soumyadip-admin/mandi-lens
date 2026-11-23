@@ -37,7 +37,7 @@ def main():
     # paging. Render free tier kills a deploy that doesn't open $PORT in time.
     # So a boot does at most a couple of pages: the newest records are enough
     # to make the site truthful, and the cron job does the full pull later.
-    if config.DATA_GOV_API_KEY:
+    if config.DATA_GOV_API_KEY and os.environ.get("BOOT_FETCH", "1") != "0":
         try:
             from ingest import fetch
             quick = int(os.environ.get("BOOT_FETCH_PAGES", "2") or 0)
@@ -51,7 +51,12 @@ def main():
         except Exception as e:
             print(f"[bootstrap] live fetch import failed: {e}")
 
-    # 2) bundled real Agmarknet export (also tops up a thin live boot)
+    # 2) fast seed so the site is useful the instant it opens.
+    # The full 1.48M-row history is NOT loaded here — it takes ~2 minutes and
+    # a free host kills a boot that doesn't open a port fast enough. Instead we
+    # load the small real export now, and the background refresher swaps in the
+    # full history from the very same file once the server is serving traffic.
+    # 3) bundled single-day Agmarknet export (smaller fallback)
     xlsx = os.path.join(config.BASE_DIR, "data", "real", "agmarknet_export.xlsx")
     if os.path.exists(xlsx):
         try:
@@ -64,7 +69,7 @@ def main():
         except Exception as e:
             print(f"[bootstrap] xlsx seed failed: {e}")
 
-    # 3) offline fixture
+    # 4) offline fixture
     try:
         from ingest import fetch
         print("[bootstrap] loading offline fixture …")

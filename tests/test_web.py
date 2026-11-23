@@ -76,6 +76,12 @@ class TestWeb(unittest.TestCase):
     def test_about(self):
         self.assertEqual(self.c.get("/about").status_code, 200)
 
+    def test_refresh_retries_after_file_seed(self):
+        """A file-seeded database must still be considered worth refreshing."""
+        from app import refresh
+        self.assertTrue(refresh.is_stale(),
+                        "file-seeded data should trigger a live retry")
+
     def test_home_has_hero_3d(self):
         """The home page must carry a live 3D hero, not just the 3D tab."""
         body = self.c.get("/").get_data(as_text=True)
