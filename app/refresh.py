@@ -196,10 +196,13 @@ def _worker():
         except Exception as e:
             print(f"[refresh] fetch failed ({e.__class__.__name__}: {e})", flush=True)
 
-        # If we couldn't get the live feed, the bundled full history is the
-        # real dataset. Load it — that is what makes the site worth looking at.
+        # If we couldn't get the live feed we do NOT import the bundled history
+        # into SQLite any more. app/lake.py queries that parquet file directly,
+        # so importing it was a 60-second job that produced nothing the site
+        # could not already answer in 30 milliseconds. On a free-tier container
+        # that job never even finished.
         if not live_ok:
-            _load_bundled_history()
+            pass
     except Exception:
         print("[refresh] failed (site keeps serving existing data)", flush=True)
         traceback.print_exc()

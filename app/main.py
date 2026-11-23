@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request, abort
 
-from . import config, db, refresh
+from . import config, db, lake, refresh
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
@@ -69,7 +69,7 @@ def freshness():
     if _fresh_cache["info"] is not None and now - _fresh_cache["at"] < _FRESH_TTL:
         return _fresh_cache["info"]
 
-    d = db.stats()
+    d = lake.stats() if lake.available() else db.stats()
     last = db.last_run()
     info = {
         "latest_date": d.get("dmax"),
@@ -144,23 +144,8 @@ def _crops3d():
     now = time.time()
     if _crops_cache["data"] is not None and now - _crops_cache["at"] < 60:
         return _crops_cache["data"]
-    if refresh.LOADING.is_set() or db.bulk_load_in_progress():
-        return _crops_cache["data"] or []
     try:
-        with db.session() as c:
-            data = [dict(r) for r in c.execute(
-                """
-                SELECT commodity,
-                       ROUND(AVG(modal_price), 0) AS avg_price,
-                       COUNT(DISTINCT market)     AS markets,
-                       COUNT(*)                   AS n
-                FROM prices
-                WHERE modal_price BETWEEN 1 AND 100000
-                GROUP BY commodity
-                HAVING n > 0
-                ORDER BY n DESC
-                LIMIT 10
-                """).fetchall()]
+        data = lake.crops3d(10) if lake.available() else (_crops_cache["data"] or [])
     except Exception:
         data = _crops_cache["data"] or []
     _crops_cache["at"] = now
@@ -178,9 +163,9 @@ def index():
     if not info["records"]:
         return render_template("empty.html", info=info)
 
-    commodities = db.commodities(state)
-    summary = db.summary(state, limit=60)
-    latest = db.latest_date(state=state)
+    commodities = lake.commodities(state)
+    summary = lake.summary(state, limit=60)
+    latest = lake.latest_date(state=state)
 
     movers = [m for m in summary if m["pct"] is not None]
     risers = sorted([m for m in movers if m["pct"] > 0], key=lambda m: -m["pct"])[:5]
@@ -188,11 +173,11 @@ def index():
 
     rows = []
     if q:
-        rows = db.search(state=state, q=q, limit=60)
+        rows = lake.search(state=state, q=q, limit=60)
 
     crops3d = _crops3d()
 
-    return render_template("index.html", crops3d=crops3d, info=info, states=db.states(),
+    return render_template("index.html", crops3d=crops3d, info=info, states=lake.states(),
                            state=state or "", q=q or "", commodities=commodities,
                            rows=rows, risers=risers, fallers=fallers,
                            latest=latest, summary=summary)
@@ -202,17 +187,17 @@ def index():
 def commodity(name):
     info = freshness()
     state = request.args.get("state") or None
-    series = db.commodity_trend(name, state, days=400)
+    series = lake.commodity_trend(name, state, days=400)
     if not series:
         abort(404)
-    spread = db.market_spread(name, state, limit=80)
+    spread = lake.market_spread(name, state, limit=80)
     chart = sparkline(series)
     best = max(spread, key=lambda r: r["modal_price"] or 0) if spread else None
     cheapest = min(spread, key=lambda r: r["modal_price"] or 10**9) if spread else None
     first, last = series[0]["avg_price"], series[-1]["avg_price"]
     overall = round((last - first) / first * 100, 1) if first else None
     return render_template("commodity.html", info=info, name=name, state=state or "",
-                           states=db.states(), series=series, chart=chart,
+                           states=lake.states(), series=series, chart=chart,
                            spread=spread, best=best, cheapest=cheapest,
                            overall=overall)
 
@@ -220,27 +205,14 @@ def commodity(name):
 @app.route("/explore")
 def explore():
     """3D explorer — the same figures, rendered as orbitable geometry."""
-    base = """
-        SELECT commodity,
-               ROUND(AVG(modal_price), 0) AS avg_price,
-               COUNT(DISTINCT market)     AS markets,
-               COUNT(DISTINCT state)      AS states,
-               COUNT(*)                   AS n
-        FROM prices
-        WHERE modal_price BETWEEN 1 AND 100000
-        {group}
-        ORDER BY markets DESC
-        LIMIT 14
-    """
-    with db.session() as c:
-        # Prefer crops with enough rows to be meaningful. On a small or freshly
-        # seeded database nothing clears that bar, so fall back to the plain
+    try:
+        # Prefer crops with enough rows to be meaningful; fall back to the plain
         # aggregate rather than showing an empty page.
-        rows = [dict(r) for r in c.execute(
-            base.format(group="GROUP BY commodity HAVING n > 100")).fetchall()]
-        if not rows:
-            rows = [dict(r) for r in c.execute(
-                base.format(group="GROUP BY commodity HAVING n > 0")).fetchall()]
+        rows = [r for r in lake.crops3d(14) if r["n"] > 100] or lake.crops3d(14)
+        for r in rows:
+            r["states"] = None
+    except Exception:
+        rows = []
 
     info = freshness()
     totals = {
@@ -264,7 +236,7 @@ def api_prices():
         "commodity": request.args.get("commodity"),
         "state": request.args.get("state"),
         "count": 0,
-        "results": db.search(
+        "results": lake.search(
             commodity=request.args.get("commodity"),
             state=request.args.get("state"),
             district=request.args.get("district"),
@@ -275,22 +247,22 @@ def api_prices():
 
 @app.route("/api/commodities")
 def api_commodities():
-    return jsonify(db.commodities(request.args.get("state")))
+    return jsonify(lake.commodities(request.args.get("state")))
 
 
 @app.route("/api/states")
 def api_states():
-    return jsonify(db.states())
+    return jsonify(lake.states())
 
 
 @app.route("/api/trend/<path:name>")
 def api_trend(name):
-    return jsonify(db.commodity_trend(name, request.args.get("state"), days=400))
+    return jsonify(lake.commodity_trend(name, request.args.get("state"), days=400))
 
 
 @app.route("/api/spread/<path:name>")
 def api_spread(name):
-    return jsonify(db.market_spread(name, request.args.get("state"), limit=100))
+    return jsonify(lake.market_spread(name, request.args.get("state"), limit=100))
 
 
 @app.before_request
