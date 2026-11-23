@@ -169,60 +169,67 @@ def clean(v):
 
 
 def normalise(records, source):
-    """Turn raw API records into clean rows. Returns (rows, rejects)."""
-    rows, rejects = [], 0
+    """
+    Turn raw API records into clean rows.
+
+    Returns (rows_iter, rejects) where `rows_iter` yields one dict at a time.
+    Streaming matters: building a 1.48M-element list of dicts pushed peak RSS
+    past what a free 512 MB instance survives, and the process was OOM-killed
+    mid-load. The rejects counter is a one-element list so it can be read after
+    the caller has consumed the iterator.
+    """
+    rejects = [0]
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    # Records from one payload share the same columns, so the keymap is
-    # identical for every row. Building it once per distinct column set turns
-    # 1.48M lookups into a handful.
-    _km = None
-    _km_cols = None
-    for rec in records:
-        cols = rec.keys()
-        if _km_cols != cols:
-            _km_cols = cols
-            _km = build_keymap(rec)
-        km = _km
-        if "state" not in km or "commodity" not in km:
-            rejects += 1
-            continue
-        row = {
-            "state": clean(rec.get(km["state"])),
-            "district": clean(rec.get(km["district"])) if "district" in km else None,
-            "market": clean(rec.get(km["market"])) if "market" in km else "Unknown",
-            "commodity": clean(rec.get(km["commodity"])),
-            "variety": clean(rec.get(km["variety"])) if "variety" in km else "",
-            "grade": clean(rec.get(km["grade"])) if "grade" in km else None,
-            "arrival_date": parse_date(rec.get(km["arrival_date"])) if "arrival_date" in km else None,
-            "min_price": parse_price(rec.get(km["min_price"])) if "min_price" in km else None,
-            "max_price": parse_price(rec.get(km["max_price"])) if "max_price" in km else None,
-            "modal_price": parse_price(rec.get(km["modal_price"])) if "modal_price" in km else None,
-            "source": source,
-            "fetched_at": now,
-        }
-        # Skip rows we cannot use at all
-        if not row["state"] or not row["commodity"]:
-            rejects += 1
-            continue
-        if row["arrival_date"] is None:
-            rejects += 1
-            continue
-        if row["variety"] is None:
-            row["variety"] = ""
-        if row["market"] is None:
-            row["market"] = "Unknown"
-        # If only min/max exist, derive a modal price rather than dropping the row
-        if row["modal_price"] is None:
-            if row["min_price"] is not None and row["max_price"] is not None:
-                row["modal_price"] = round((row["min_price"] + row["max_price"]) / 2, 2)
-            else:
-                rejects += 1
+
+    def _iter():
+        # Records from one payload share the same columns, so the keymap is
+        # identical for the whole batch. Build it once.
+        km = None
+        km_cols = None
+        for rec in records:
+            cols = rec.keys()
+            if km_cols != cols:
+                km_cols = cols
+                km = build_keymap(rec)
+            if "state" not in km or "commodity" not in km:
+                rejects[0] += 1
                 continue
-        rows.append(row)
-    return rows, rejects
+            row = {
+                "state": clean(rec.get(km["state"])),
+                "district": clean(rec.get(km["district"])) if "district" in km else None,
+                "market": clean(rec.get(km["market"])) if "market" in km else "Unknown",
+                "commodity": clean(rec.get(km["commodity"])),
+                "variety": clean(rec.get(km["variety"])) if "variety" in km else "",
+                "grade": clean(rec.get(km["grade"])) if "grade" in km else None,
+                "arrival_date": parse_date(rec.get(km["arrival_date"])) if "arrival_date" in km else None,
+                "min_price": parse_price(rec.get(km["min_price"])) if "min_price" in km else None,
+                "max_price": parse_price(rec.get(km["max_price"])) if "max_price" in km else None,
+                "modal_price": parse_price(rec.get(km["modal_price"])) if "modal_price" in km else None,
+                "source": source,
+                "fetched_at": now,
+            }
+            if not row["state"] or not row["commodity"]:
+                rejects[0] += 1
+                continue
+            if row["arrival_date"] is None:
+                rejects[0] += 1
+                continue
+            if row["variety"] is None:
+                row["variety"] = ""
+            if row["market"] is None:
+                row["market"] = "Unknown"
+            # If only min/max exist, derive a modal price rather than dropping
+            if row["modal_price"] is None:
+                if row["min_price"] is not None and row["max_price"] is not None:
+                    row["modal_price"] = round((row["min_price"] + row["max_price"]) / 2, 2)
+                else:
+                    rejects[0] += 1
+                    continue
+            yield row
+
+    return _iter(), rejects
 
 
-# ---------------------------------------------------------------- transport
 def _get(params_url, params):
     r = requests.get(params_url, params=params, timeout=config.REQUEST_TIMEOUT,
                      headers={"User-Agent": "MandiLens/1.0 (+open data client)"})
@@ -298,8 +305,8 @@ def fetch_fixture():
 
 def load(records, source):
     rows, rejects = normalise(records, source.split(":")[0])
-    ins, upd = db.upsert_many(rows)
-    return len(rows), ins, upd, rejects
+    ins, upd = db.upsert_many(rows)          # consumes the generator
+    return ins + upd, ins, upd, rejects[0]
 
 
 def run(mode="live", limit_pages=None, verbose=True):

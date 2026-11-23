@@ -18,6 +18,7 @@ Usage:
     python -m ingest.loadfile big.parquet --limit 200000
 """
 import argparse
+import gc
 import io
 import os
 import sys
@@ -81,7 +82,11 @@ def _stringify_dates(df):
     return df
 
 
-CHUNK = 25000   # rows per pass: keeps peak memory near ~60MB, not ~1.5GB
+# Rows per pass. The free Render instance has 512 MB total, and the web
+# process is also serving pages while this runs. 10k keeps the transient
+# pandas objects small; combined with the explicit gc below, peak memory stays
+# comfortably under the limit.
+CHUNK = 20000
 
 
 def _iter_chunks(path_or_url, limit=None):
@@ -134,15 +139,22 @@ def load(path_or_url, limit=None, verbose=True):
                 continue
             df = _stringify_dates(df)
             total_read += len(df)
-            rows, rejects = normalise(df.to_dict(orient="records"), "live")
-            total_rej += rejects
-            total_clean += len(rows)
-            i, u = db.upsert_many(rows)
+            # normalise() yields instead of building a list, and the rows go
+            # straight into sqlite. Peak held row-dicts at any moment: one.
+            rows, rejects = normalise(
+                (r for r in df.to_dict(orient="records")), "live")
+            i, u = db.upsert_many(rows)      # consumes the generator
             ins += i
             upd += u
+            # Release the chunk before the next one. Without this the peak
+            # grows across batches and the free instance gets OOM-killed
+            # mid-load, which is why the row count kept resetting.
+            del df, rows
+            gc.collect()
             if verbose and total_read % 250000 < CHUNK:
                 print(f"  … {total_read:,} read, {ins:,} new", flush=True)
 
+        total_clean = ins + upd
         if total_clean == 0:
             raise ValueError("no usable rows after cleaning — check the column names")
         # Build indexes once, after the bulk load. Doing it up-front makes a
