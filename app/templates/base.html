@@ -66,6 +66,10 @@ nav a.on,nav a:hover{color:var(--ink)}
 
 main{padding:26px 0 70px}
 h1{font-size:27px;letter-spacing:-.6px;margin:0 0 6px;line-height:1.2}
+.notice{background:rgba(224,86,122,.10);border:1px solid rgba(224,86,122,.45);
+border-left:4px solid #e0567a;border-radius:10px;padding:14px 16px;margin:0 0 22px;
+font-size:14px;line-height:1.6;color:#f0d7de}
+.notice b{color:#ff8fa8}
 .lede{color:var(--dim);font-size:15px;margin:0 0 22px;max-width:70ch}
 
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
@@ -173,7 +177,19 @@ footer.site .wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-bet
 </div></div>
 {% endif %}
 
-<main><div class="wrap">{% block body %}{% endblock %}</div></main>
+<main><div class="wrap">
+{% block banner %}
+{% if info is defined and info.days_old is defined and info.days_old is not none and info.days_old > 3 %}
+<div class="notice">
+  <b>Historical data — not today's prices.</b>
+  Newest records: <b>{{ info.latest_date }}</b> ({{ info.days_old }} days old).
+  This is a historical archive of official wholesale prices; do not read these
+  figures as current market rates.
+</div>
+{% endif %}
+{% endblock %}
+{% block body %}{% endblock %}
+</div></main>
 
 <footer class="site"><div class="wrap">
   <span><b>Mandi Lens</b> — data from

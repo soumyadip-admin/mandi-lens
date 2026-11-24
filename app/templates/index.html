@@ -1,14 +1,29 @@
 {% extends "base.html" %}
+{% block banner %}{% endblock %}
 {% block body %}
 
+{% if info.is_fresh %}
 <h1>Today's mandi prices</h1>
+{% else %}
+<h1>Mandi prices</h1>
+{% endif %}
 <p class="lede">Wholesale crop prices from government markets across India.
 Pick a crop to see what it's selling for, market by market.</p>
+
+{% if not info.is_fresh and info.days_old is not none %}
+<div class="notice">
+  <b>Historical data — not today's prices.</b>
+  The newest records here are from <b>{{ info.latest_date }}</b>,
+  {{ info.days_old }} days ago. This is a complete historical archive of
+  wholesale prices, kept up to date whenever new government data can be
+  obtained. Do not treat these figures as current market rates.
+</div>
+{% endif %}
 
 {% if crops3d %}
 <div class="hero3d">
   <canvas id="hero3d"></canvas>
-  <div class="hero3d-cap"><b>Live 3D</b> · drag to spin · hover a bar</div>
+  <div class="hero3d-cap"><b>3D</b> · drag to spin · hover a bar</div>
 </div>
 {% endif %}
 
@@ -59,7 +74,7 @@ Pick a crop to see what it's selling for, market by market.</p>
 </div>
 
 <div class="card" id="table">
-  <h2>{% if q %}Search results{% else %}What each crop costs today{% endif %}</h2>
+  <h2>{% if q %}Search results{% elif info.is_fresh %}What each crop costs today{% else %}What each crop cost on {{ info.latest_date }}{% endif %}</h2>
   {% if rows %}
   <div class="scroll">
   <table class="data">
