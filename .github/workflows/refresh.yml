@@ -1,9 +1,10 @@
 name: Daily data refresh
 
 # The government API does not route from Render, so the data has to arrive
-# with the code. This job refreshes data/real/market_history.parquet and
-# commits it. Render watches the repo, so the site redeploys with new numbers
-# on its own. Nothing runs on the server side.
+# with the code. This job refreshes data/real/market_history.parquet, rebuilds
+# the precomputed snapshot the site serves from, and commits both. Render
+# watches the repo, so the site redeploys with new numbers on its own.
+# Nothing runs on the server side.
 
 on:
   schedule:
@@ -56,11 +57,17 @@ jobs:
               sys.exit("refusing to commit: too few rows")
           PY
 
+      - name: Rebuild the precomputed snapshot
+        # The site serves pages from this file, so it must be regenerated
+        # whenever the parquet changes - otherwise the site would keep showing
+        # the old numbers even though the data underneath was new.
+        run: python -m app.precompute
+
       - name: Commit the new file
         run: |
           git config user.name  "mandi-lens bot"
           git config user.email "actions@github.com"
-          git add data/real/market_history.parquet
+          git add data/real/market_history.parquet data/real/precomputed.json
           if git diff --staged --quiet; then
             echo "No change in the data today."
             exit 0
