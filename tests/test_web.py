@@ -20,20 +20,18 @@ class TestWeb(unittest.TestCase):
         run("fixture", verbose=False)
         cls.c = app.test_client()
 
-    def test_health_is_instant_while_loading(self):
-        """A health check during a history load must not touch the database."""
-        from app import refresh
-        refresh.LOADING.set()
-        try:
-            t0 = time.time()
-            r = self.c.get("/health")
-            elapsed = time.time() - t0
-            self.assertEqual(r.status_code, 200)
-            self.assertTrue(r.get_json()["ok"])
-            self.assertTrue(r.get_json()["loading"])
-            self.assertLess(elapsed, 0.5)
-        finally:
-            refresh.LOADING.clear()
+    def test_health_is_instant(self):
+        """
+        Render treats a slow /health as a dead service and restarts it, so this
+        endpoint must never touch the database or the disk.
+        """
+        t0 = time.time()
+        r = self.c.get("/health")
+        elapsed = time.time() - t0
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+        self.assertIn("records", r.get_json())
+        self.assertLess(elapsed, 0.5)
 
     def test_health(self):
         r = self.c.get("/health")
