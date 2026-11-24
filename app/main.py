@@ -70,7 +70,12 @@ def freshness():
         return _fresh_cache["info"]
 
     d = lake.stats() if lake.available() else db.stats()
-    last = db.last_run()
+    if lake.preloaded():
+        # No SQLite read on any page render. The run log only matters for the
+        # "live feed" provenance note, which cannot be 'live' here anyway.
+        last = {"source": "file", "ended_at": None}
+    else:
+        last = db.last_run()
     info = {
         "latest_date": d.get("dmax"),
         "records": d.get("n") or 0,
@@ -92,6 +97,19 @@ def freshness():
             info["stale"] = age_h > config.STALE_AFTER_HOURS
         except ValueError:
             pass
+    # How far behind today the newest row is. Drives the notice on every page:
+    # showing "Today's prices" over two-month-old data is simply dishonest.
+    ld = info.get("latest_date")
+    if ld:
+        try:
+            from datetime import date as _date
+            y, m, d = (int(x) for x in str(ld)[:10].split("-"))
+            info["days_old"] = (_date.today() - _date(y, m, d)).days
+        except Exception:
+            info["days_old"] = None
+    info["is_fresh"] = (info.get("days_old") is not None
+                        and info["days_old"] <= 3)
+
     src = info["source"]
     info["dataset_note"] = {
         "live":    "Live feed from data.gov.in.",
@@ -267,7 +285,15 @@ def api_spread(name):
 
 @app.before_request
 def _kick_refresh():
-    """Opportunistically refresh stale data in the background, never inline."""
+    """
+    Opportunistically refresh stale data in the background, never inline.
+
+    Skipped entirely when the precomputed snapshot is present: there is nothing
+    to fetch on this instance (the government API is unreachable from Render)
+    and even checking costs a SQLite read, which we cannot afford per request.
+    """
+    if lake.preloaded():
+        return
     if request.endpoint in ("health", "index"):
         try:
             refresh.maybe_refresh()
@@ -278,22 +304,11 @@ def _kick_refresh():
 @app.route("/health")
 def health():
     """
-    Render's health check. Must answer in milliseconds even while the history
-    is loading — a slow reply here gets the service marked unhealthy and
-    restarted, which is what threw away the load over and over.
+    Render's health check. Answers from memory only — no database, no files.
+
+    Anything that touches disk here is fatal on a 0.1-vCPU instance: a slow
+    reply marks the service unhealthy and it gets restarted mid-request.
     """
-    if refresh.LOADING.is_set() or db.history_load_running():
-        # Reuse the last known numbers rather than recomputing them: the point
-        # of this branch is to answer instantly, not to be fresh.
-        last_known = _fresh_cache["info"] or {}
-        return jsonify({"ok": True, "loading": True,
-                        "records": last_known.get("records", 0),
-                        "latest_date": last_known.get("latest_date"),
-                        "stale": last_known.get("stale", False),
-                        "last_run": last_known.get("run"),
-                        "detail": "importing bundled history",
-                        "generated_at":
-                        datetime.now(timezone.utc).isoformat(timespec="seconds")})
     i = freshness()
     return jsonify({"ok": i["records"] > 0, "records": i["records"],
                     "latest_date": i["latest_date"], "stale": i["stale"],

@@ -16,6 +16,7 @@ SQLite is still used, but only for the small mutable bits — the run log and th
 cross-process lock. Anything read-only that lives in the price history goes
 through here.
 """
+import json
 import os
 import threading
 from datetime import date, datetime
@@ -38,8 +39,28 @@ _SRC = "(SELECT state, district, market, commodity, " \
        "min_price, max_price, modal_price FROM read_parquet(?)) AS prices"
 
 
+PRECOMPUTED = os.path.join(config.BASE_DIR, "data", "real", "precomputed.json")
+
+_pre = {}
+
+
 def available():
     return os.path.exists(PARQUET)
+
+
+def preloaded():
+    """True when the precomputed JSON is present, i.e. pages need no queries."""
+    return bool(_pre) or os.path.exists(PRECOMPUTED)
+
+
+def _load_pre():
+    if not _pre:
+        try:
+            with open(PRECOMPUTED) as f:
+                _pre.update(json.load(f))
+        except Exception:
+            pass
+    return _pre or None
 
 
 def _conn():
@@ -74,6 +95,7 @@ def bump_cache():
     """Drop every memoised result. Call after the data changes."""
     with _CACHE_LOCK:
         _CACHE.clear()
+    _pre.clear()
 
 
 def _cached(key, fn):
@@ -103,6 +125,9 @@ def status():
 
 
 def stats():
+    p = _load_pre()
+    if p:
+        return p["stats"]
     return _cached("stats", lambda: _stats())
 
 
@@ -114,6 +139,9 @@ def _stats():
 
 
 def states():
+    p = _load_pre()
+    if p:
+        return p["states"]
     return _cached("states", lambda: _states())
 
 
@@ -123,6 +151,9 @@ def _states():
 
 
 def commodities(state=None, limit=400):
+    p = _load_pre()
+    if p and not state:
+        return p["commodities"][:limit]
     return _cached(("commodities", state, limit), lambda: _commodities(state, limit))
 
 
@@ -139,6 +170,9 @@ def _commodities(state, limit):
 
 
 def latest_date(state=None, commodity=None):
+    p = _load_pre()
+    if p and not commodity:
+        return p["latest"].get(state or "*")
     return _cached(("latest", state, commodity),
                    lambda: _latest_date(state, commodity))
 
@@ -193,6 +227,11 @@ def _search(commodity, state, district, q, date_from, date_to, sort, limit):
 
 
 def commodity_trend(commodity, state=None, days=400):
+    p = _load_pre()
+    if p and not state:
+        rows = p["trends"].get(commodity)
+        if rows is not None:
+            return rows[-days:]
     return _cached(("trend", commodity, state, days),
                    lambda: _commodity_trend(commodity, state, days))
 
@@ -211,6 +250,9 @@ def _commodity_trend(commodity, state, days):
 
 
 def crops3d(limit=10):
+    p = _load_pre()
+    if p:
+        return p["crops3d"][:limit]
     return _cached(("crops3d", limit), lambda: _crops3d(limit))
 
 
@@ -224,6 +266,11 @@ def _crops3d(limit):
 
 def summary(state=None, limit=40):
     """One row per crop: markets reporting, latest average price, week-on-week."""
+    p = _load_pre()
+    if p:
+        rows = p["summary"].get(state or "*")
+        if rows is not None:
+            return rows[:limit]
     return _cached(("summary", state, limit), lambda: _summary(state, limit))
 
 
@@ -292,6 +339,11 @@ def _summary_fallback(state=None, limit=40):
 
 def market_spread(commodity, state=None, limit=60):
     """Latest price per market plus change against that market's previous report."""
+    p = _load_pre()
+    if p and not state:
+        rows = p["spreads"].get(commodity)
+        if rows is not None:
+            return rows[:limit]
     return _cached(("spread", commodity, state, limit),
                    lambda: _market_spread(commodity, state, limit))
 
